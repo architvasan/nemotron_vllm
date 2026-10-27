@@ -1,5 +1,9 @@
 # Nemotron-3.5-Super-VL-120B on JLSE (vLLM)
 
+> **Running on ALCF Polaris instead?** See **[README_POLARIS.md](README_POLARIS.md)** —
+> the model doesn't fit one Polaris node (4× A100-40 GB), so that recipe serves it
+> across **2 nodes** with Ray + TP4×PP2 under PBS.
+
 End-to-end recipe to download, serve, and query
 `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16` on JLSE GPUs via vLLM,
 reachable from your laptop over an SSH tunnel as an OpenAI-compatible endpoint.
