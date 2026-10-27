@@ -32,10 +32,16 @@ NODE_IP=$(ip -4 -o addr show hsn0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 |
 
 RAY_TMP=/tmp/ray_${USER}_${PBS_JOBID:-0}
 INST=nemo
+# Ray lives in a read-only apptainer overlay (the vllm-openai image ships without
+# it). RO is required: one ext3 overlay file cannot be writable from two nodes at
+# once; Ray only reads its package files here, and its runtime writes go to RAY_TMP
+# on node-local /tmp.
+OVERLAY=${OVERLAY:-$BASE/ray-overlay.img}
 
 # One apptainer instance on this node, holding the Ray daemons.
 apptainer instance stop "$INST" 2>/dev/null || true
 apptainer instance start --nv \
+  --overlay "$OVERLAY":ro \
   --bind /grand \
   --env HF_HOME=$BASE/cache \
   --env HF_HUB_OFFLINE=1 \
@@ -57,8 +63,13 @@ apptainer instance start --nv \
 EXEC="apptainer exec instance://$INST"
 
 if [ "$RANK" != "0" ]; then
-  # ---- WORKER: join the head's Ray cluster and block ----
-  echo "[rank $RANK] worker $NODE_IP joining ray head $HEAD_IP:$RAY_PORT"
+  # ---- WORKER: wait for the head's GCS port, then join and block ----
+  echo "[rank $RANK] worker $NODE_IP waiting for ray head $HEAD_IP:$RAY_PORT"
+  for i in $(seq 1 120); do
+    (exec 3<>"/dev/tcp/$HEAD_IP/$RAY_PORT") 2>/dev/null && { exec 3>&- 3<&-; break; }
+    sleep 2
+  done
+  echo "[rank $RANK] head reachable; joining"
   $EXEC ray start --address="$HEAD_IP:$RAY_PORT" \
     --node-ip-address="$NODE_IP" --num-gpus=4 --temp-dir="$RAY_TMP" --block
   apptainer instance stop "$INST" 2>/dev/null || true
@@ -88,7 +99,7 @@ cat "$BASE/ENDPOINT.txt"
 
 # wait until every worker has joined (EXPECT_GPUS visible to Ray)
 echo "[rank 0] waiting for $EXPECT_GPUS GPUs to register with Ray ..."
-$EXEC python - "$EXPECT_GPUS" <<'PYEOF'
+$EXEC python3 - "$EXPECT_GPUS" <<'PYEOF'
 import ray, sys, time
 want = int(sys.argv[1])
 ray.init(address="auto", log_to_driver=False)

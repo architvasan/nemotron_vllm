@@ -20,6 +20,7 @@ BASE=/grand/FRAME-IDP/avasan/nemotron
 export BASE
 export SIF=$BASE/vllm-0.32.0.sif
 export MODEL=$BASE/model
+export OVERLAY=$BASE/ray-overlay.img    # read-only overlay that adds Ray to the image
 export PORT=8000
 export RAY_PORT=6379
 

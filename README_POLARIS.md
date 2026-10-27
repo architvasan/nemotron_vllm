@@ -12,9 +12,10 @@ as an OpenAI-compatible endpoint.
 | Scheduler | Cobalt (`qsub -t <min> -n <nodes>`) | **PBS Pro** (`qsub -l select=… -q … -A …`) |
 | GPU | 4× **H100-80 GB** (320 GB/node) | 4× **A100-40 GB** (160 GB/node) |
 | Fit | whole model on **1 node**, TP4 | **doesn't fit 1 node** → **2 nodes**, TP4×PP2 + Ray |
-| Container build | podman→tar→compute (8 GB login cgroup) | `apptainer build` straight on the login node |
+| Container build | podman→tar→compute (8 GB login cgroup) | `apptainer build` on a **compute node** (login cgroup thread cap hangs it) |
+| Ray | in base image | **not** in `vllm-openai` image → added via a `:ro` overlay |
 | Weights | `/vast/users/avasan/nemotron` | `/grand/FRAME-IDP/avasan/nemotron` (`-l filesystems=home:grand`) |
-| Internet | login only | login only (via `proxy.alcf.anl.gov:3128`) |
+| Internet | login only | login + **compute** (both via `proxy.alcf.anl.gov:3128`) |
 
 **The memory math:** BF16 weights are ~249 GB; one Polaris node is 160 GB. Split
 over 8 GPUs that's ~31 GB of weights/GPU, leaving ~5–6 GB/GPU for KV cache —
@@ -32,6 +33,7 @@ route first; switch to verbs/OFI later for throughput.
 ```
 model/                       # the 249 GB weights (63 shards + configs)
 vllm-0.32.0.sif              # vLLM container (apptainer)
+ray-overlay.img              # ext3 overlay that adds ray to the SIF (mounted :ro)
 venv/                        # HF-download venv (built from conda/2026-10-01 python)
 ENDPOINT.txt                 # head node / port, rewritten each launch
 logs/                        # hf_download.log, build.log, DONE markers
@@ -65,11 +67,28 @@ ssh polaris "cd /grand/FRAME-IDP/avasan/nemotron/<repo> && bash scripts/01_downl
 ```
 
 ## 2. Build the container — `scripts/02_build_container_polaris.sh`
-Run on a **login** node. `apptainer build` straight from Docker Hub via the
-proxy, in a detached `tmux` (`nemobuild`). Scratch goes on `/grand`.
+The SIF must be built on a **compute node**, not the login node: on the login
+node rootless `apptainer build` / `mksquashfs` hang against the cgroup thread+pids
+cap ("Failed to create thread") and rootless `podman pull` crawls at 0 B/s.
+`02_build_container_polaris.sh` just `qsub`s the real build job
+(`scripts/02b_build_sif_polaris.pbs`, debug queue, ~8 min) which pulls from Docker
+Hub through the proxy with `APPTAINER_TMPDIR` on node-local `/local/scratch`.
 ```bash
-ssh polaris "cd .../<repo> && bash scripts/02_build_container_polaris.sh"
-# done: ls -lh /grand/FRAME-IDP/avasan/nemotron/vllm-0.32.0.sif
+ssh polaris "cd .../<repo> && bash scripts/02_build_container_polaris.sh"   # submits 02b
+# watch: qstat -xf <jobid> | grep job_state ; done at 'BUILD_DONE_OK'
+# done:  ls -lh /grand/FRAME-IDP/avasan/nemotron/vllm-0.32.0.sif
+```
+
+### 2b. Add Ray — `scripts/02c_build_ray_overlay.sh`
+The `vllm-openai` image ships **without ray**, which multi-node vLLM needs as its
+`--distributed-executor-backend`. Bake ray into a small ext3 overlay (mounted
+`:ro` at serve time). Run on a compute node (needs the proxy for pip):
+```bash
+# grab an interactive node, then run the script:
+ssh polaris "qsub -I -A FRAME-IDP -q debug -l select=1:system=polaris \
+  -l walltime=00:30:00 -l filesystems=home:grand"
+#   (inside)  bash .../<repo>/scripts/02c_build_ray_overlay.sh
+# done: ls -lh /grand/FRAME-IDP/avasan/nemotron/ray-overlay.img  (verify prints 'OK ray ... vllm ...')
 ```
 
 ## 3. Serve — `serve_nemotron_polaris.sh` (PBS, 2 nodes)

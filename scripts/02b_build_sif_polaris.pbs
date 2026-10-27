@@ -1,0 +1,33 @@
+#!/bin/bash
+# Build the vLLM SIF on a COMPUTE node, straight from Docker Hub via the ALCF proxy.
+# WHY compute, not login: apptainer/podman rootless layer extraction hangs against
+# the login node cgroup thread/pids cap. Compute nodes have no such cap, fast local
+# NVMe, and reach outbound through http(s)_proxy. So we do the whole pull+build here.
+#PBS -N nemo_build_sif
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=00:50:00
+#PBS -l filesystems=home:grand
+#PBS -q debug
+#PBS -A FRAME-IDP
+set -ex
+module use /soft/modulefiles
+module load spack-pe-base/0.10.1
+module load apptainer/1.4.1
+export HTTP_PROXY=http://proxy.alcf.anl.gov:3128 HTTPS_PROXY=http://proxy.alcf.anl.gov:3128
+export http_proxy=http://proxy.alcf.anl.gov:3128 https_proxy=http://proxy.alcf.anl.gov:3128
+BASE=/grand/FRAME-IDP/avasan/nemotron
+SIF=$BASE/vllm-0.32.0.sif
+LOCAL=/local/scratch/nemo.${PBS_JOBID:-$$}
+[ -d /local/scratch ] || LOCAL=/tmp/nemo.${PBS_JOBID:-$$}
+mkdir -p $LOCAL/cache
+export APPTAINER_TMPDIR=$LOCAL APPTAINER_CACHEDIR=$LOCAL/cache
+hostname; df -h $LOCAL | tail -1
+echo ===proxy reachability from compute===
+curl -sS -m 25 -o /dev/null -w "dockerhub via proxy: %{http_code}\n" https://registry-1.docker.io/v2/ || echo PROXY_UNREACHABLE
+rm -f $SIF
+apptainer build --mksquashfs-args "-processors 8" $SIF docker://docker.io/vllm/vllm-openai:v0.32.0
+ls -lh $SIF
+apptainer exec $SIF python -c "import vllm; print(\"vllm\", vllm.__version__)" || true
+rm -rf $LOCAL
+echo BUILD_DONE_OK
