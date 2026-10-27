@@ -1,0 +1,21 @@
+# Never commit the heavy / runtime artifacts
+model/
+*.sif
+*.tar
+*.oci.tar
+venv/
+cache/
+apptainer_cache/
+vllm_cache/
+triton/
+inductor/
+xdg/
+tmp/
+logs/
+ENDPOINT.txt
+*.cobaltlog
+*.output
+*.error
+.build_jobid
+.serve_jobid
+__pycache__/
