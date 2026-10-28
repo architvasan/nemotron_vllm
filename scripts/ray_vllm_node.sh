@@ -39,7 +39,7 @@ INST=nemo
 OVERLAY=${OVERLAY:-$BASE/ray-overlay.img}
 
 # One apptainer instance on this node, holding the Ray daemons.
-apptainer instance stop "$INST" 2>/dev/null || true
+apptainer instance stop "$INST" >/dev/null 2>&1 || true
 apptainer instance start --nv \
   --overlay "$OVERLAY":ro \
   --bind /grand \
@@ -72,7 +72,7 @@ if [ "$RANK" != "0" ]; then
   echo "[rank $RANK] head reachable; joining"
   $EXEC ray start --address="$HEAD_IP:$RAY_PORT" \
     --node-ip-address="$NODE_IP" --num-gpus=4 --temp-dir="$RAY_TMP" --block
-  apptainer instance stop "$INST" 2>/dev/null || true
+  apptainer instance stop "$INST" >/dev/null 2>&1 || true
   exit 0
 fi
 
@@ -97,12 +97,15 @@ started=$(date)
 EOT
 cat "$BASE/ENDPOINT.txt"
 
-# wait until every worker has joined (EXPECT_GPUS visible to Ray)
+# wait until every worker has joined (EXPECT_GPUS visible to Ray).
+# NOTE: `ray start --head` used a custom --temp-dir, so address="auto" / a bare
+# `ray status` (which both probe the DEFAULT /tmp/ray) can't find the cluster and
+# throw ConnectionError. We therefore connect with the EXPLICIT head address.
 echo "[rank 0] waiting for $EXPECT_GPUS GPUs to register with Ray ..."
-$EXEC python3 - "$EXPECT_GPUS" <<'PYEOF'
+$EXEC python3 - "$EXPECT_GPUS" "$HEAD_IP:$RAY_PORT" <<'PYEOF'
 import ray, sys, time
-want = int(sys.argv[1])
-ray.init(address="auto", log_to_driver=False)
+want = int(sys.argv[1]); addr = sys.argv[2]
+ray.init(address=addr, log_to_driver=False)
 deadline = time.time() + 600
 g = 0
 while time.time() < deadline:
@@ -112,8 +115,8 @@ while time.time() < deadline:
     time.sleep(5)
 print(f"TIMEOUT waiting for GPUs: {g}/{want}"); sys.exit(1)
 PYEOF
-if [ $? -ne 0 ]; then echo "ray cluster never reached $EXPECT_GPUS GPUs"; $EXEC ray status; exit 1; fi
-$EXEC ray status
+if [ $? -ne 0 ]; then echo "ray cluster never reached $EXPECT_GPUS GPUs"; $EXEC ray status --address "$HEAD_IP:$RAY_PORT" || true; exit 1; fi
+$EXEC ray status --address "$HEAD_IP:$RAY_PORT"
 
 # ---- serve ----
 $EXEC vllm serve "$MODEL" \
@@ -135,4 +138,4 @@ $EXEC vllm serve "$MODEL" \
 
 # vllm exited -> tear the cluster down so the worker ranks unblock and the job ends
 $EXEC ray stop || true
-apptainer instance stop "$INST" 2>/dev/null || true
+apptainer instance stop "$INST" >/dev/null 2>&1 || true
